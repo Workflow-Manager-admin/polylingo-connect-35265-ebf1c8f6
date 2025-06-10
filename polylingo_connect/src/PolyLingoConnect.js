@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import "./App.css";
 
 /*
@@ -42,6 +42,16 @@ function PolyLingoConnect() {
   const [isVoiceMode, setIsVoiceMode] = useState(false);
   const [inputText, setInputText] = useState("");
   const [historyCollapsed, setHistoryCollapsed] = useState(true);
+
+  // Speech Recognition state
+  const [isListening, setIsListening] = useState(false); // true if currently recording from the microphone
+  const [recognitionError, setRecognitionError] = useState(null); // error message if any
+  const [isSpeechSupported, setIsSpeechSupported] = useState(true); // If browser supports SpeechRecognition
+
+  // Reference for SpeechRecognition instance and transcript
+  const recognitionRef = useRef(null);
+  const transcriptRef = useRef(""); // For accumulating the transcript
+
   // Dummy translations/history for scaffolding
   const dummyTranslations = [
     { lang: "en", text: "Hello", key: "en" },
@@ -52,6 +62,12 @@ function PolyLingoConnect() {
     { source: "Bonjour", from: "fr", to: ["en"], translations: ["Hello"] },
   ];
 
+  // On mount: Check speech recognition support
+  React.useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) setIsSpeechSupported(false);
+  }, []);
+  
   // Handler: when the input language changes (keep label in sync for accessibility)
   // PUBLIC_INTERFACE
   const handleInputLanguageChange = (e) => {
@@ -60,16 +76,28 @@ function PolyLingoConnect() {
     const selectedLabel = LANGUAGES.find((lang) => lang.code === code)?.label || "Unknown";
     setInputLanguageLabel(selectedLabel);
     // If the selected language is changed from 'auto' AND current 'auto' was disabled, enable it
-    // No additional state logic needed.
   };
 
   // Handler: input text changed
   // PUBLIC_INTERFACE
   const handleInputTextChange = (e) => setInputText(e.target.value);
 
-  // Handler: toggle between text and voice mode
+  // Handler: toggle between text and voice mode (stop recognition if leaving voice mode)
   // PUBLIC_INTERFACE
-  const handleVoiceModeToggle = () => setIsVoiceMode((prev) => !prev);
+  const handleVoiceModeToggle = () => {
+    setIsVoiceMode((prev) => {
+      const toVoice = !prev;
+      if (!toVoice) {
+        // If leaving voice mode, ensure mic is stopped
+        if (recognitionRef.current && isListening) {
+          recognitionRef.current.stop();
+        }
+      } else {
+        setRecognitionError(null);
+      }
+      return toVoice;
+    });
+  };
 
   // Handler: output languages change (multi-select!)
   // PUBLIC_INTERFACE
@@ -77,6 +105,84 @@ function PolyLingoConnect() {
     const selected = Array.from(e.target.selectedOptions, (opt) => opt.value);
     setOutputLanguages(selected);
   };
+
+  // Handler: Start/Stop voice recording with browser-native SpeechRecognition
+  // PUBLIC_INTERFACE
+  const handleVoiceInputClick = () => {
+    if (!isSpeechSupported) return;
+    setRecognitionError(null);
+    if (!isListening) {
+      // Start voice capture
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        setIsSpeechSupported(false);
+        setRecognitionError("Speech Recognition not supported in this browser.");
+        return;
+      }
+      const recognition = new SpeechRecognition();
+      recognitionRef.current = recognition;
+
+      // Language: Use BCP-47 code if possible, fall back to browser default
+      let langCode = inputLanguage === "auto" ? undefined : inputLanguage;
+      // Convert our codes to browser ones for most common cases
+      if (langCode === "zh") langCode = "zh-CN";
+      if (langCode && langCode !== "auto") recognition.lang = langCode;
+
+      recognition.continuous = false; // For this UI, treat each press as single utterance; set true for long speech
+      recognition.interimResults = true; // display partial transcript in real time
+
+      transcriptRef.current = "";
+
+      recognition.onresult = (event) => {
+        if (!event.results) return;
+        let finalTranscript = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            finalTranscript += res[0].transcript;
+          } else {
+            finalTranscript += res[0].transcript;
+          }
+        }
+        transcriptRef.current = finalTranscript;
+        setInputText(finalTranscript);
+      };
+      recognition.onerror = (event) => {
+        setRecognitionError("Voice input error: " + (event.error || "unknown"));
+        setIsListening(false);
+      };
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+      recognition.onnomatch = () => {
+        setRecognitionError("Could not recognize speech.");
+        setIsListening(false);
+      };
+      setIsListening(true);
+      recognition.start();
+    } else {
+      // Already listening: stop
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+    }
+  };
+
+  // If component unmounts, stop speech recognition
+  React.useEffect(() => {
+    return () => {
+      if (recognitionRef.current) recognitionRef.current.stop();
+    };
+  }, []);
+
+  // Update inputText if leaving voice mode (saves recognized text)
+  React.useEffect(() => {
+    if (!isVoiceMode && transcriptRef.current) {
+      setInputText(transcriptRef.current);
+      transcriptRef.current = "";
+    }
+  }, [isVoiceMode]);
 
   // PUBLIC_INTERFACE: keyboard accessibility, pressing Enter in text area submits (future)
   // Can extend to submit translation on Ctrl+Enter, etc.
@@ -158,7 +264,6 @@ function PolyLingoConnect() {
                 {isVoiceMode ? "🎤 Voice Input" : "⌨️ Text Input"}
               </button>
             </div>
-
             {/* Input area */}
             <div
               style={{
@@ -171,18 +276,47 @@ function PolyLingoConnect() {
               }}
             >
               {isVoiceMode ? (
-                <button
-                  className="btn btn-large"
-                  aria-label="Start voice input"
-                  style={{
-                    width: "100%",
-                    minWidth: "210px",
-                    maxWidth: "440px"
-                  }}
-                  tabIndex={0}
-                >
-                  <span role="img" aria-label="Microphone">🎙️ Start Speaking</span>
-                </button>
+                <div style={{ width: "100%", maxWidth: 440, minWidth: 210 }}>
+                  <button
+                    className="btn btn-large"
+                    aria-label={isListening ? "Stop voice input" : "Start voice input"}
+                    onClick={handleVoiceInputClick}
+                    style={{
+                      width: "100%",
+                      opacity: isSpeechSupported ? 1 : 0.4,
+                      cursor: isSpeechSupported ? "pointer" : "not-allowed",
+                      background: isListening ? "#FFD166" : undefined,
+                      color: isListening ? "#1A1A1A" : undefined,
+                    }}
+                    disabled={!isSpeechSupported}
+                    tabIndex={0}
+                  >
+                    <span role="img" aria-label="Microphone">
+                      {isListening ? "🛑 Stop Listening" : "🎙️ Start Speaking"}
+                    </span>
+                  </button>
+                  <div style={{
+                    minHeight: 38,
+                    marginTop: 8,
+                    padding: 5,
+                    background: "#182838",
+                    borderRadius: 6,
+                    color: isListening ? "#FFD166" : "var(--text-color)",
+                    fontSize: "1.09rem",
+                    outline: isListening ? "2px solid #FFD166" : undefined,
+                    transition: "background 0.2s"
+                  }}>
+                    {inputText || (isListening ? <span style={{ opacity: 0.6 }}>Listening…</span> : <span style={{ opacity: 0.7, fontStyle: "italic" }}>Tap mic to speak</span>)}
+                  </div>
+                  {!isSpeechSupported && <div style={{ color: "#FF5555", marginTop: 7, fontSize: "0.97rem" }}>
+                    ⚠️ Speech recognition not supported in this browser.
+                  </div>}
+                  {recognitionError && (
+                    <div style={{ color: "#FF5555", marginTop: 7, fontSize: "0.97rem" }}>
+                      {recognitionError}
+                    </div>
+                  )}
+                </div>
               ) : (
                 <textarea
                   value={inputText}
@@ -211,7 +345,7 @@ function PolyLingoConnect() {
             </div>
             <div id="input-language-hint" style={{ color: "var(--text-secondary)", fontSize: "0.98em", textAlign: "center", marginTop: 6 }}>
               {inputLanguage === "auto"
-                ? "The language will be detected automatically as you type."
+                ? "The language will be detected automatically as you type or speak."
                 : `Current input language: ${inputLanguageLabel}`}
             </div>
           </section>
