@@ -2,6 +2,12 @@ import React, { useState, useRef } from "react";
 import "./App.css";
 
 /*
+  This component supports both text and browser-native voice input.
+  - Integrates with window.SpeechRecognition / window.webkitSpeechRecognition for speech-to-text.
+  - Accessible microphone button with dynamic states, error handling, and visual indication.
+  - Updates state in real-time; acts as a progressive enhancement (degrades gracefully on unsupported browsers).
+*/
+/*
   PolyLingo Connect Main Container
 
   Features & Layout:
@@ -28,14 +34,22 @@ const LANGUAGES = [
   // Add more languages as needed.
 ];
 
+// PUBLIC_INTERFACE
+function isBrowserSpeechRecognitionAvailable() {
+  // Returns the constructor if supported, else null
+  return (
+    window.SpeechRecognition ||
+    window.webkitSpeechRecognition ||
+    null
+  );
+}
+
 /**
  * PUBLIC_INTERFACE
- * PolyLingoConnect: The main container for multilingual translation app.
- * Implements responsive input area for text (with language selection + Detect), voice mode toggle,
- * accessible UI, and robust input state management.
+ * PolyLingoConnect: Main multilingual translation container with text/voice input, selection, outputs, and history.
  */
 function PolyLingoConnect() {
-  // Robust state management for input text and language.
+  // State management for core app logic
   const [inputLanguage, setInputLanguage] = useState("auto");
   const [inputLanguageLabel, setInputLanguageLabel] = useState("Detect Language");
   const [outputLanguages, setOutputLanguages] = useState(["en", "fr"]);
@@ -44,13 +58,19 @@ function PolyLingoConnect() {
   const [historyCollapsed, setHistoryCollapsed] = useState(true);
 
   // Speech Recognition state
-  const [isListening, setIsListening] = useState(false); // true if currently recording from the microphone
-  const [recognitionError, setRecognitionError] = useState(null); // error message if any
-  const [isSpeechSupported, setIsSpeechSupported] = useState(true); // If browser supports SpeechRecognition
+  const [isListening, setIsListening] = useState(false);
+  const [recognitionError, setRecognitionError] = useState(null);
+  const [isSpeechSupported, setIsSpeechSupported] = useState(true);
 
-  // Reference for SpeechRecognition instance and transcript
+  // Refs for SpeechRecognition instance and transcript
   const recognitionRef = useRef(null);
-  const transcriptRef = useRef(""); // For accumulating the transcript
+  const transcriptRef = useRef("");
+
+  // Monitor browser speech recognition support on mount
+  React.useEffect(() => {
+    const SpeechRecognition = isBrowserSpeechRecognitionAvailable();
+    setIsSpeechSupported(Boolean(SpeechRecognition));
+  }, []);
 
   // Dummy translations/history for scaffolding
   const dummyTranslations = [
@@ -106,14 +126,17 @@ function PolyLingoConnect() {
     setOutputLanguages(selected);
   };
 
-  // Handler: Start/Stop voice recording with browser-native SpeechRecognition
+  // Handler: Start/Stop browser-native SpeechRecognition for voice input
   // PUBLIC_INTERFACE
   const handleVoiceInputClick = () => {
-    if (!isSpeechSupported) return;
+    if (!isSpeechSupported) {
+      setRecognitionError("Speech recognition is not supported in your browser.");
+      return;
+    }
     setRecognitionError(null);
     if (!isListening) {
-      // Start voice capture
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      // Start recognition
+      const SpeechRecognition = isBrowserSpeechRecognitionAvailable();
       if (!SpeechRecognition) {
         setIsSpeechSupported(false);
         setRecognitionError("Speech Recognition not supported in this browser.");
@@ -122,46 +145,62 @@ function PolyLingoConnect() {
       const recognition = new SpeechRecognition();
       recognitionRef.current = recognition;
 
-      // Language: Use BCP-47 code if possible, fall back to browser default
+      // Set recognition language (uses BCP-47 codes); fallback to browser locale if "auto"
       let langCode = inputLanguage === "auto" ? undefined : inputLanguage;
-      // Convert our codes to browser ones for most common cases
       if (langCode === "zh") langCode = "zh-CN";
       if (langCode && langCode !== "auto") recognition.lang = langCode;
 
-      recognition.continuous = false; // For this UI, treat each press as single utterance; set true for long speech
-      recognition.interimResults = true; // display partial transcript in real time
+      recognition.continuous = false; // Single utterance per click for now
+      recognition.interimResults = true;
 
+      // Init transcript
       transcriptRef.current = "";
 
+      // On result: accumulate transcript, update in real time
       recognition.onresult = (event) => {
         if (!event.results) return;
         let finalTranscript = "";
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const res = event.results[i];
-          if (res.isFinal) {
-            finalTranscript += res[0].transcript;
-          } else {
-            finalTranscript += res[0].transcript;
-          }
+          finalTranscript += res[0].transcript;
         }
         transcriptRef.current = finalTranscript;
         setInputText(finalTranscript);
       };
-      recognition.onerror = (event) => {
-        setRecognitionError("Voice input error: " + (event.error || "unknown"));
-        setIsListening(false);
-      };
+
       recognition.onend = () => {
         setIsListening(false);
       };
-      recognition.onnomatch = () => {
-        setRecognitionError("Could not recognize speech.");
+
+      recognition.onerror = (event) => {
+        let errMsg = "Voice input error: ";
+        if (event.error === "not-allowed" || event.error === "denied") {
+          errMsg += "Microphone access denied.";
+        } else if (event.error === "no-speech") {
+          errMsg += "No speech detected.";
+        } else if (event.error) {
+          errMsg += event.error;
+        } else {
+          errMsg += "Unknown error.";
+        }
+        setRecognitionError(errMsg);
         setIsListening(false);
       };
+
+      recognition.onnomatch = () => {
+        setRecognitionError("Sorry, could not recognize speech.");
+        setIsListening(false);
+      };
+
       setIsListening(true);
-      recognition.start();
+      try {
+        recognition.start();
+      } catch (e) {
+        setRecognitionError("Unable to start recognition: " + e.message);
+        setIsListening(false);
+      }
     } else {
-      // Already listening: stop
+      // If currently listening, stop recognition
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
@@ -169,14 +208,17 @@ function PolyLingoConnect() {
     }
   };
 
-  // If component unmounts, stop speech recognition
+  // On unmount, cleanup and stop any running recognition to avoid "leaks"/audio artifacts
   React.useEffect(() => {
     return () => {
-      if (recognitionRef.current) recognitionRef.current.stop();
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
     };
   }, []);
 
-  // Update inputText if leaving voice mode (saves recognized text)
+  // Whenever leaving voice mode, keep recognized transcript (simulate input persistence)
   React.useEffect(() => {
     if (!isVoiceMode && transcriptRef.current) {
       setInputText(transcriptRef.current);
@@ -184,8 +226,8 @@ function PolyLingoConnect() {
     }
   }, [isVoiceMode]);
 
-  // PUBLIC_INTERFACE: keyboard accessibility, pressing Enter in text area submits (future)
-  // Can extend to submit translation on Ctrl+Enter, etc.
+  // PUBLIC_INTERFACE: keyboard accessibility (future: e.g., Enter/Ctrl+Enter submits)
+  // Also: supports all tab controls, pointer, and ARIA for voice mode section.
 
   return (
     <div className="app polylingo-main">
@@ -280,6 +322,7 @@ function PolyLingoConnect() {
                   <button
                     className="btn btn-large"
                     aria-label={isListening ? "Stop voice input" : "Start voice input"}
+                    aria-pressed={isListening}
                     onClick={handleVoiceInputClick}
                     style={{
                       width: "100%",
@@ -287,32 +330,56 @@ function PolyLingoConnect() {
                       cursor: isSpeechSupported ? "pointer" : "not-allowed",
                       background: isListening ? "#FFD166" : undefined,
                       color: isListening ? "#1A1A1A" : undefined,
+                      boxShadow: isListening ? "0 0 0 3px #FFD16655" : undefined,
+                      outline: isListening ? "2px solid #FFD166" : undefined,
                     }}
                     disabled={!isSpeechSupported}
                     tabIndex={0}
+                    id="voice-mic-btn"
                   >
-                    <span role="img" aria-label="Microphone">
-                      {isListening ? "🛑 Stop Listening" : "🎙️ Start Speaking"}
+                    <span
+                      role="img"
+                      aria-label={isListening ? "Currently listening, tap to stop" : "Start voice input"}
+                      style={{ marginRight: 8 }}
+                    >
+                      {isListening ? "🛑" : "🎙️"}
                     </span>
+                    {isListening ? "Stop Listening" : "Start Speaking"}
                   </button>
-                  <div style={{
-                    minHeight: 38,
-                    marginTop: 8,
-                    padding: 5,
-                    background: "#182838",
-                    borderRadius: 6,
-                    color: isListening ? "#FFD166" : "var(--text-color)",
-                    fontSize: "1.09rem",
-                    outline: isListening ? "2px solid #FFD166" : undefined,
-                    transition: "background 0.2s"
-                  }}>
-                    {inputText || (isListening ? <span style={{ opacity: 0.6 }}>Listening…</span> : <span style={{ opacity: 0.7, fontStyle: "italic" }}>Tap mic to speak</span>)}
+                  <div
+                    aria-live="polite"
+                    aria-atomic="true"
+                    style={{
+                      minHeight: 38,
+                      marginTop: 8,
+                      padding: 5,
+                      background: "#182838",
+                      borderRadius: 6,
+                      color: isListening ? "#FFD166" : "var(--text-color)",
+                      fontSize: "1.09rem",
+                      outline: isListening ? "2px solid #FFD166" : undefined,
+                      transition: "background 0.2s"
+                    }}
+                  >
+                    {/* If listening but nothing yet said, show live "Listening..." message for a11y */}
+                    {inputText
+                      ? inputText
+                      : isListening
+                        ? <span style={{ opacity: 0.66 }} aria-live="assertive">Listening…</span>
+                        : <span style={{ opacity: 0.7, fontStyle: "italic" }}>Tap mic to speak</span>
+                    }
                   </div>
-                  {!isSpeechSupported && <div style={{ color: "#FF5555", marginTop: 7, fontSize: "0.97rem" }}>
-                    ⚠️ Speech recognition not supported in this browser.
-                  </div>}
+                  {!isSpeechSupported && (
+                    <div style={{ color: "#FF5555", marginTop: 7, fontSize: "0.97rem" }} aria-live="assertive" role="alert">
+                      ⚠️ Speech recognition not supported in this browser.
+                    </div>
+                  )}
                   {recognitionError && (
-                    <div style={{ color: "#FF5555", marginTop: 7, fontSize: "0.97rem" }}>
+                    <div
+                      style={{ color: "#FF5555", marginTop: 7, fontSize: "0.97rem" }}
+                      aria-live="assertive"
+                      role="alert"
+                    >
                       {recognitionError}
                     </div>
                   )}
