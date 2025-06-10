@@ -1,0 +1,4 @@
+{
+    "command": "npm run test",
+    "working_directory": "/home/kavia/workspace/code-generation/polylingo-connect-35265-ebf1c8f6/polylingo_connect"
+}
